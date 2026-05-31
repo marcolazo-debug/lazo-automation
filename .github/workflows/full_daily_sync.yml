@@ -1,0 +1,24 @@
+name: Full Daily Sync (Monday → HubSpot)
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # 8am UTC = 4am ET
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run full daily sync
+        env:
+          HS_TOKEN: ${{ secrets.HS_TOKEN }}
+          MONDAY_TOKEN: ${{ secrets.MONDAY_TOKEN }}
+        run: python3 lazo_quote_money_daily_sync.py
