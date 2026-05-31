@@ -23,8 +23,14 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 csv.field_size_limit(sys.maxsize)
 
-HS_H = {"Authorization":"Bearer pat-na2-e00f5c8e-cd02-4ec6-95db-8b733677335b","Content-Type":"application/json"}
-MONDAY_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJ0aWQiOjY1MzEwODg2MSwiYWFpIjoxMSwidWlkIjoxMDE3NDk2MzEsImlhZCI6IjIwMjYtMDUtMDNUMTM6MDA6NDkuMDAwWiIsInBlciI6Im1lOndyaXRlIiwiYWN0aWQiOjE0NTQ2ODI1LCJyZ24iOiJ1c2UxIn0.GCnjKZ1VqvdiQFIxPKsjIm1Q06hF1ytPaUGqC2IxcE4"
+HS_TOKEN = os.environ.get("HS_TOKEN", "")
+if not HS_TOKEN:
+    raise SystemExit("ERROR: HS_TOKEN environment variable is required")
+HS_H = {"Authorization": f"Bearer {HS_TOKEN}", "Content-Type": "application/json"}
+
+MONDAY_TOKEN = os.environ.get("MONDAY_TOKEN", "")
+if not MONDAY_TOKEN:
+    raise SystemExit("ERROR: MONDAY_TOKEN environment variable is required")
 MH = {"Authorization": MONDAY_TOKEN, "Content-Type": "application/json", "API-Version": "2024-01"}
 
 VENTAS_PIPELINE = "2250405610"
