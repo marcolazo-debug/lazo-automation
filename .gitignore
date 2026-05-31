@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.quote_money_sync_state.json
+.quote_money_sync.lock
+*.log
