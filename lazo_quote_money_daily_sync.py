@@ -70,6 +70,17 @@ STATE_TAG = {
     "Review":             "REVIEW",
 }
 
+# Monday Propuesta state → HubSpot quote hs_status value
+HS_STATUS_MAP = {
+    "Accepted":           "APPROVED",
+    "Completed":          "APPROVED",
+    "Lost":               "REJECTED",
+    "Awaiting acceptance":"PENDING_APPROVAL",
+    "Draft":              "DRAFT",
+    "Review":             "DRAFT",
+    "":                   "DRAFT",
+}
+
 
 def hs(method, path, body=None, retries=3):
     for a in range(retries):
@@ -355,11 +366,24 @@ def step1_refresh_ignition_all_quote_ids(opps, props, dry_run=False):
     return _apply_batch_update('deals', updates)
 
 
-def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_run=False):
+def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_run=False, limit=None):
     """Create HS Quote objects for any PROP-XXX in deals but missing.
-    Uses Monday Propuestas as source (no Ignition CSV needed)."""
+    Uses Monday Propuestas as data source.
+
+    Fields set on each new quote:
+      hs_title                  [STATE] PROP-XXX — Proposal Name
+      hs_status                 mapped from Monday state (APPROVED/PENDING_APPROVAL/REJECTED/DRAFT)
+      ignition_proposal_ref     PROP-XXX
+      ignition_client_id        from the associated deal's ignition_client_id
+      lazo_acceptance_status    ACCEPTED/REJECTED/AWAITING/DRAFT (never UNKNOWN)
+      ignition_minimum_value_total  monthly + annual + oneshot from Monday
+      hs_quote_amount           same value
+      hs_currency               USD
+      hs_language               en
+      hs_expiration_date        accepted_at + fallback today + 1y
+    """
     print('\n=== STEP 2: create missing quotes (source: Monday Propuestas) ===', flush=True)
-    # Index propuestas by ref (prefer Accepted/Completed status if duplicated)
+    # Index propuestas by ref (prefer Accepted/Completed if ref appears multiple times)
     ref_info = {}
     for p in propuestas.values():
         r = p['ref']
@@ -372,44 +396,98 @@ def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_r
                 ref_info[r] = p
 
     to_create = []
-    for ref, deal_ids in ref_to_deals.items():
-        if ref in existing_quotes: continue
-        info = ref_info.get(ref, {})
-        state = info.get('status','')
-        tag = STATE_TAG.get(state, 'UNKNOWN')
-        name = info.get('name','') or ref
+    skipped_existing = 0
+    for ref, deal_entries in ref_to_deals.items():
+        if ref in existing_quotes:
+            skipped_existing += 1
+            continue
+
+        info  = ref_info.get(ref, {})
+        state = info.get('status', '')
+
+        # Title tag: never emit UNKNOWN — fall back to DRAFT
+        tag   = STATE_TAG.get(state, 'DRAFT')
+        name  = (info.get('name', '') or '').strip() or ref
         title = f"[{tag}] {ref} — {truncate(name, 100)}"
-        exp = info.get('accepted_at') or (datetime.now()+timedelta(days=365)).strftime('%Y-%m-%d')
-        to_create.append({'ref':ref,'deals':deal_ids,'props':{
-            'hs_title':title,'hs_status':'DRAFT','hs_currency':'USD','hs_language':'en','hs_expiration_date':exp,
-        }})
-    print(f'  Quotes to create: {len(to_create)}')
-    if dry_run or not to_create: return 0
+
+        # HubSpot hs_status value
+        hs_status = HS_STATUS_MAP.get(state, 'DRAFT')
+
+        # Monetary value: monthly + annual + one-shot from Monday
+        amount = (info.get('monthly', 0) or 0) + \
+                 (info.get('annual',  0) or 0) + \
+                 (info.get('oneshot', 0) or 0)
+
+        # Expiration: use accepted_at if present, otherwise today + 1 year
+        exp = info.get('accepted_at') or ''
+        if not exp:
+            exp = (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d')
+
+        # Best ignition_client_id: prefer the first deal entry that has one
+        cid = ''
+        for entry in deal_entries:
+            if entry.get('ignition_client_id'):
+                cid = entry['ignition_client_id']
+                break
+
+        props = {
+            'hs_title':                    title,
+            'hs_status':                   hs_status,
+            'hs_currency':                 'USD',
+            'hs_language':                 'en',
+            'hs_expiration_date':          exp,
+            'ignition_proposal_ref':       ref,
+            'lazo_acceptance_status':      tag,
+        }
+        if cid:
+            props['ignition_client_id'] = cid
+        if amount > 0:
+            props['ignition_minimum_value_total'] = str(amount)
+            props['hs_quote_amount']              = str(amount)
+
+        deal_ids = [e['deal_id'] for e in deal_entries]
+        to_create.append({'ref': ref, 'deals': deal_ids, 'props': props})
+
+    print(f'  Existing (skipped): {skipped_existing}')
+    print(f'  Quotes to create:   {len(to_create)}')
+    if not to_create or dry_run:
+        return 0
+    if limit:
+        print(f'  (limited to first {limit} for testing)')
+        to_create = to_create[:limit]
 
     created_count = 0
     new_qids_by_ref = {}
     for batch in chunks(to_create, 100):
-        title_to_ref = {x['props']['hs_title']: x['ref'] for x in batch}
-        inputs = [{'properties':x['props']} for x in batch]
-        st, d = hs('POST','/crm/v3/objects/quotes/batch/create',{'inputs':inputs})
-        if st in (200,201,207):
-            for res in d.get('results',[]):
-                title = (res.get('properties') or {}).get('hs_title','')
-                ref = title_to_ref.get(title)
-                if ref: new_qids_by_ref[ref] = res['id']; created_count += 1
+        ref_to_title = {x['ref']: x['props']['hs_title'] for x in batch}
+        title_to_ref = {v: k for k, v in ref_to_title.items()}
+        inputs = [{'properties': x['props']} for x in batch]
+        st, d = hs('POST', '/crm/v3/objects/quotes/batch/create', {'inputs': inputs})
+        if st in (200, 201, 207):
+            for res in d.get('results', []):
+                t = (res.get('properties') or {}).get('hs_title', '')
+                r = title_to_ref.get(t)
+                if r:
+                    new_qids_by_ref[r] = res['id']
+                    created_count += 1
+        else:
+            print(f'  BATCH CREATE FAIL HTTP {st}: {str(d)[:200]}', flush=True)
         time.sleep(0.3)
-    # Associate to deals
+
+    # Associate quotes → deals
     assoc_inputs = []
     for x in to_create:
         qid = new_qids_by_ref.get(x['ref'])
         if not qid: continue
         for did in x['deals']:
-            assoc_inputs.append({'from':{'id':qid},'to':{'id':did},'type':'quote_to_deal'})
+            assoc_inputs.append({'from': {'id': qid}, 'to': {'id': did}, 'type': 'quote_to_deal'})
     assoc_ok = 0
     for batch in chunks(assoc_inputs, 100):
-        st, d = hs('POST','/crm/v3/associations/quotes/deals/batch/create',{'inputs':batch})
-        if st in (200,201,207): assoc_ok += len(d.get('results',[]))
+        st, d = hs('POST', '/crm/v3/associations/quotes/deals/batch/create', {'inputs': batch})
+        if st in (200, 201, 207):
+            assoc_ok += len(d.get('results', []))
         time.sleep(0.2)
+
     print(f'  Created: {created_count}, associations: {assoc_ok}')
     return created_count
 
@@ -624,15 +702,17 @@ def load_ignition_csv():
 
 
 def build_ref_to_deals():
-    """For Step 2: build PROP-XXX -> [deal_ids] across Ventas + Upsells."""
+    """For Step 2: build PROP-XXX -> [{'deal_id': id, 'ignition_client_id': cid}] across Ventas + Upsells."""
     ref_to_deals = defaultdict(list)
     for pipe in (VENTAS_PIPELINE, UPSELLS_PIPELINE):
-        deals = load_hs_deals(pipe, ['ignition_all_quote_ids','ignition_quote_id','ignition_proposal_ref','monday_upsell_id_propuesta'])
+        deals = load_hs_deals(pipe, ['ignition_all_quote_ids','ignition_quote_id','ignition_proposal_ref',
+                                     'monday_upsell_id_propuesta','ignition_client_id'])
         for deal in deals:
             p = deal.get('properties') or {}
             text = ' '.join([p.get(f) or '' for f in ('ignition_all_quote_ids','ignition_quote_id','ignition_proposal_ref','monday_upsell_id_propuesta')])
+            cid  = (p.get('ignition_client_id') or '').strip()
             for ref in set(m.upper() for m in PROP_RE.findall(text)):
-                ref_to_deals[ref].append(deal['id'])
+                ref_to_deals[ref].append({'deal_id': deal['id'], 'ignition_client_id': cid})
     return ref_to_deals
 
 
@@ -642,6 +722,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--skip", default="", help="Comma-separated step numbers to skip (1-6)")
+    ap.add_argument("--limit-step2", type=int, default=None,
+                    help="Limit quotes created in step 2 (for testing, e.g. --limit-step2 5)")
     ap.add_argument("--incremental", action="store_true",
                     help="Only process items changed since last run (steps 3-6)")
     ap.add_argument("--since-minutes", type=int, default=None,
@@ -721,7 +803,7 @@ def main():
         if 2 not in skip:
             ref_to_deals = build_ref_to_deals()
             existing_quotes = load_hs_quotes()
-            totals['step2'] = step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, args.dry_run)
+            totals['step2'] = step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, args.dry_run, args.limit_step2)
 
     # Steps 3-6: run with optional delta filter
     if 3 not in skip and (not incremental or cr):
