@@ -70,6 +70,17 @@ STATE_TAG = {
     "Review":             "REVIEW",
 }
 
+# STATE_TAG → lazo_acceptance_status enum value (only ACCEPTED/AWAITING/DRAFT/REJECTED/UNKNOWN allowed)
+LAZO_ACCEPTANCE_MAP = {
+    "ACCEPTED":  "ACCEPTED",
+    "COMPLETED": "ACCEPTED",   # Completed proposals = accepted
+    "REJECTED":  "REJECTED",
+    "AWAITING":  "AWAITING",
+    "DRAFT":     "DRAFT",
+    "REVIEW":    "DRAFT",      # Review = in-progress, closest is DRAFT
+    "UNKNOWN":   "UNKNOWN",
+}
+
 # Monday Propuesta state → HubSpot quote hs_status value
 HS_STATUS_MAP = {
     "Accepted":           "APPROVED",
@@ -439,6 +450,9 @@ def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_r
                 cid = entry['ignition_client_id']
                 break
 
+        # lazo_acceptance_status must be a valid enum value (ACCEPTED/AWAITING/DRAFT/REJECTED/UNKNOWN)
+        lazo_status = LAZO_ACCEPTANCE_MAP.get(tag, 'DRAFT')
+
         props = {
             'hs_title':                    title,
             'hs_status':                   hs_status,
@@ -446,7 +460,7 @@ def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_r
             'hs_language':                 'en',
             'hs_expiration_date':          exp_ms,   # ms timestamp required by HubSpot
             'ignition_proposal_ref':       ref,
-            'lazo_acceptance_status':      tag,
+            'lazo_acceptance_status':      lazo_status,
         }
         if cid:
             props['ignition_client_id'] = cid
