@@ -410,8 +410,11 @@ def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_r
         name  = (info.get('name', '') or '').strip() or ref
         title = f"[{tag}] {ref} — {truncate(name, 100)}"
 
-        # HubSpot hs_status value
-        hs_status = HS_STATUS_MAP.get(state, 'DRAFT')
+        # hs_status: always DRAFT on creation — HubSpot requires template + line items
+        # + deal association to accept APPROVED/REJECTED transitions, which is too
+        # expensive to do per-quote in a batch.  The acceptance state is tracked via
+        # lazo_acceptance_status (custom property) and the [TAG] title prefix instead.
+        hs_status = 'DRAFT'
 
         # Monetary value: monthly + annual + one-shot from Monday
         amount = (info.get('monthly', 0) or 0) + \
