@@ -327,27 +327,66 @@ def load_hs_deals(pipeline, properties):
 
 def load_hs_quotes():
     """Return dict PROP-XXX -> {quote_id, title, status_tag, locked}.
-    Locked quotes cannot be updated via PATCH — they need to be flagged so
-    Step 3 skips them."""
+
+    Uses ignition_proposal_ref property (set by fixed step2) as the primary key.
+    Falls back to title-regex extraction for quotes created before the fix.
+    Multi-pass date-windowed search to overcome HubSpot's 10,000 offset cap.
+    Locked quotes are flagged so Step 3 skips them.
+    """
     print('  loading HS Quotes...', flush=True)
     quotes = {}
-    after = None
-    while True:
-        body = {'limit':100,'properties':['hs_title','hs_locked'],'sorts':[{'propertyName':'hs_createdate','direction':'DESCENDING'}]}
-        if after: body['after']=after
-        st, d = hs('POST','/crm/v3/objects/quotes/search',body)
-        for q in d.get('results',[]):
-            title = q['properties'].get('hs_title','') or ''
-            locked = (q['properties'].get('hs_locked') or '').lower() == 'true'
-            m = PROP_RE.search(title)
-            if m:
-                ref = m.group(0).upper()
+
+    def _search_window(date_gte_ms=None, date_lt_ms=None):
+        after = None
+        while True:
+            filters = [{"propertyName": "hs_createdate", "operator": "HAS_PROPERTY"}]
+            if date_gte_ms:
+                filters.append({"propertyName": "hs_createdate", "operator": "GTE",
+                                 "value": str(date_gte_ms)})
+            if date_lt_ms:
+                filters.append({"propertyName": "hs_createdate", "operator": "LT",
+                                 "value": str(date_lt_ms)})
+            body = {
+                'filterGroups': [{'filters': filters}],
+                'limit': 100,
+                'properties': ['hs_title', 'hs_locked', 'ignition_proposal_ref'],
+                'sorts': [{'propertyName': 'hs_createdate', 'direction': 'ASCENDING'}],
+            }
+            if after: body['after'] = after
+            st, d = hs('POST', '/crm/v3/objects/quotes/search', body)
+            if st != 200: break
+            results = d.get('results', [])
+            if not results: break
+            for q in results:
+                p       = q['properties']
+                title   = (p.get('hs_title') or '').strip()
+                locked  = (p.get('hs_locked') or '').lower() == 'true'
+                # Primary: use ignition_proposal_ref property (set by fixed step2)
+                ref = (p.get('ignition_proposal_ref') or '').strip().upper()
+                # Fallback: extract from title (pre-fix quotes or edge cases)
+                if not ref:
+                    m = PROP_RE.search(title)
+                    if m: ref = m.group(0).upper()
+                if not ref: continue
                 stat_m = re.match(r'^\[([A-Z]+)\]', title)
                 status = stat_m.group(1) if stat_m else ''
-                quotes[ref] = {'qid': q['id'], 'title': title, 'status_tag': status, 'locked': locked}
-        after = d.get('paging',{}).get('next',{}).get('after')
-        if not after: break
-        time.sleep(0.15)
+                # Keep first occurrence (oldest wins — avoids overwriting with newer duplicates)
+                if ref not in quotes:
+                    quotes[ref] = {'qid': q['id'], 'title': title,
+                                   'status_tag': status, 'locked': locked}
+            after = d.get('paging', {}).get('next', {}).get('after')
+            if not after: break
+            time.sleep(0.15)
+
+    # Split by date window: pre-2026-06-09 and 2026-06-09+
+    # The batch was created on 2026-06-09, so most new quotes are there.
+    # Pre window covers old import_ignition_quotes.py quotes (<10k, safe).
+    from datetime import timezone
+    cut = int(datetime(2026, 6, 9, 0, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    _search_window(date_lt_ms=cut)
+    _search_window(date_gte_ms=cut)
+
+    print(f'  loaded {len(quotes):,} quotes', flush=True)
     return quotes
 
 
