@@ -21,4 +21,4 @@ jobs:
         env:
           HS_TOKEN: ${{ secrets.HS_TOKEN }}
           MONDAY_TOKEN: ${{ secrets.MONDAY_TOKEN }}
-        run: python3 lazo_quote_money_daily_sync.py --limit-step2 5
+        run: python3 lazo_quote_money_daily_sync.py
