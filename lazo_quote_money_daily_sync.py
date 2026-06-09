@@ -96,9 +96,12 @@ def monday(q, retries=3):
     for a in range(retries):
         try:
             req=urllib.request.Request('https://api.monday.com/v2', data=json.dumps({'query':q}).encode(), headers=MH, method='POST')
-            with urllib.request.urlopen(req, timeout=30) as r: return json.loads(r.read())
+            with urllib.request.urlopen(req, timeout=45) as r: return json.loads(r.read())
         except urllib.error.HTTPError as e:
             if a<retries-1: time.sleep(3); continue
+            raise
+        except (TimeoutError, OSError) as e:
+            if a<retries-1: time.sleep(5); continue
             raise
 
 
