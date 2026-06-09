@@ -418,10 +418,13 @@ def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_r
                  (info.get('annual',  0) or 0) + \
                  (info.get('oneshot', 0) or 0)
 
-        # Expiration: use accepted_at if present, otherwise today + 1 year
-        exp = info.get('accepted_at') or ''
-        if not exp:
-            exp = (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d')
+        # Expiration: HubSpot requires Unix timestamp in ms (not a date string)
+        exp_str = info.get('accepted_at') or ''
+        try:
+            base = datetime.strptime(exp_str[:10], '%Y-%m-%d') if exp_str else datetime.now()
+        except ValueError:
+            base = datetime.now()
+        exp_ms = str(int((base + timedelta(days=365)).timestamp() * 1000))
 
         # Best ignition_client_id: prefer the first deal entry that has one
         cid = ''
@@ -435,15 +438,15 @@ def step2_create_missing_quotes(propuestas, ref_to_deals, existing_quotes, dry_r
             'hs_status':                   hs_status,
             'hs_currency':                 'USD',
             'hs_language':                 'en',
-            'hs_expiration_date':          exp,
+            'hs_expiration_date':          exp_ms,   # ms timestamp required by HubSpot
             'ignition_proposal_ref':       ref,
             'lazo_acceptance_status':      tag,
         }
         if cid:
             props['ignition_client_id'] = cid
         if amount > 0:
+            # hs_quote_amount is READ-ONLY (computed from line items); do not set it
             props['ignition_minimum_value_total'] = str(amount)
-            props['hs_quote_amount']              = str(amount)
 
         deal_ids = [e['deal_id'] for e in deal_entries]
         to_create.append({'ref': ref, 'deals': deal_ids, 'props': props})
